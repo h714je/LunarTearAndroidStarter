@@ -28,6 +28,13 @@ out/
 # Native binaries generated from Go
 app/src/main/jniLibs/**/*.so
 **/jniLibs/**/*.so
+*.apk
+*.aab
+*.tar
+*.idx.json
+*.db
+*.db-shm
+*.db-wal
 
 # Go build artifacts
 server/bin/

@@ -1,0 +1,75 @@
+# Android / Gradle
+.gradle/
+build/
+*/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+app/release/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Built Android artifacts
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+
+# Kotlin / Java
+.kotlin/
+out/
+
+# Native binaries generated from Go
+app/src/main/jniLibs/**/*.so
+**/jniLibs/**/*.so
+
+# Go build artifacts
+server/bin/
+server/dist/
+server/*.exe
+server/*.test
+server/coverage.out
+server/build-android-libs.sh.bak
+
+# Local game assets, huge archives, runtime data
+server/assets/
+server/assets.tar
+server/assets.tar.*
+server/*.tar
+server/*.tar.gz
+server/*.zip
+server/*.idx
+server/*.idx.json
+assets/
+assets.tar
+assets.tar.*
+*.idx.json
+
+# Runtime DB / logs
+server/db/
+db/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Launcher/app runtime exports
+db.zip
+launcher.log
+
+# Secrets / signing
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

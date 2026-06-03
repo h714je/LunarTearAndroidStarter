@@ -1,0 +1,296 @@
+diff --git a/server/cmd/lunar-tear/main.go b/server/cmd/lunar-tear/main.go
+index edf09e2..17173d0 100644
+--- a/server/cmd/lunar-tear/main.go
++++ b/server/cmd/lunar-tear/main.go
+@@ -8,6 +8,7 @@ import (
+ 	"os/signal"
+ 	"syscall"
+ 
++  "lunar-tear/server/migrations"
+ 	"lunar-tear/server/internal/database"
+ 	"lunar-tear/server/internal/gametime"
+ 	"lunar-tear/server/internal/runtime"
+@@ -45,6 +46,10 @@ func main() {
+ 	defer db.Close()
+ 	log.Printf("database opened: %s", *dbPath)
+ 
++  if err := migrations.Up(ctx, db); err != nil {
++	log.Fatalf("run migrations: %v", err)
++  }
++  
+ 	userStore := sqlite.New(db, gametime.Now)
+ 
+ 	grpcServer := startGRPC(*listen, *publicAddr, *octoURL, *authURL, userStore, holder, *noRegister)
+diff --git a/server/cmd/octo-cdn/main.go b/server/cmd/octo-cdn/main.go
+index 112d509..9ff8896 100644
+--- a/server/cmd/octo-cdn/main.go
++++ b/server/cmd/octo-cdn/main.go
+@@ -22,6 +22,8 @@ func main() {
+ 	listen := flag.String("listen", "0.0.0.0:8080", "local bind address (host:port)")
+ 	publicAddr := flag.String("public-addr", "127.0.0.1:8080", "externally-reachable host:port used for list.bin URL rewriting")
+ 	assetsDir := flag.String("assets-dir", ".", "root directory containing the assets/ tree")
++	assetsTar := flag.String("assets-tar", "", "optional tar archive containing the assets/ tree; avoids extracting thousands of files")
++	assetsIndex := flag.String("assets-index", "", "optional JSON index cache for assets-tar; defaults to <assets-tar>.idx.json")
+ 	flag.Parse()
+ 
+ 	// Build resourcesBaseURL from public-addr (must be exactly 43 chars to fit in list.bin protobuf).
+@@ -34,7 +36,10 @@ func main() {
+ 		resourcesBaseURL = prefix + strings.Repeat("r", padLen)
+ 	}
+ 
+-	octoServer := service.NewOctoHTTPServer(resourcesBaseURL, *assetsDir)
++	octoServer, err := service.NewOctoHTTPServer(resourcesBaseURL, *assetsDir, *assetsTar, *assetsIndex)
++	if err != nil {
++		log.Fatalf("init assets: %v", err)
++	}
+ 	h2s := &http2.Server{}
+ 	handler := h2c.NewHandler(octoServer.Handler(), h2s)
+ 
+@@ -54,6 +59,9 @@ func main() {
+ 	if *assetsDir != "." {
+ 		log.Printf("assets directory: %s", *assetsDir)
+ 	}
++	if *assetsTar != "" {
++		log.Printf("assets tar: %s", *assetsTar)
++	}
+ 
+ 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ 	defer stop()
+diff --git a/server/internal/service/asset_resolver.go b/server/internal/service/asset_resolver.go
+index c5edf57..6e71485 100644
+--- a/server/internal/service/asset_resolver.go
++++ b/server/internal/service/asset_resolver.go
+@@ -22,6 +22,7 @@ type assetResolution struct {
+ 
+ type assetResolver struct {
+ 	baseDir string
++	assets  assetStore
+ }
+ 
+ func newRevisionTracker() *revisionTracker {
+@@ -30,8 +31,8 @@ func newRevisionTracker() *revisionTracker {
+ 	}
+ }
+ 
+-func newAssetResolver(baseDir string) *assetResolver {
+-	return &assetResolver{baseDir: baseDir}
++func newAssetResolver(baseDir string, assets assetStore) *assetResolver {
++	return &assetResolver{baseDir: baseDir, assets: assets}
+ }
+ 
+ func normalizeClientAddr(remoteAddr string) string {
+@@ -75,7 +76,7 @@ func (r *assetResolver) Resolve(objectId, assetType, activeRevision, platform st
+ 	resolution := assetResolution{ActiveRevision: activeRevision}
+ 	revision := activeRevision
+ 
+-	candidates, listSize, ok := objectIdToFilePathCandidates(r.baseDir, revision, platform, assetType, objectId)
++	candidates, listSize, ok := objectIdToFilePathCandidates(r.assets, r.baseDir, revision, platform, assetType, objectId)
+ 	if ok && len(candidates) > 0 {
+ 		resolution.ListRevision = revision
+ 		resolution.ListSize = listSize
+@@ -96,6 +97,6 @@ func (r *assetResolver) Prewarm(activeRevision, platform string) {
+ 	if activeRevision == "" {
+ 		return
+ 	}
+-	_, _ = loadListBinIndex(r.baseDir, activeRevision, platform)
+-	_ = loadInfoIndex(r.baseDir, activeRevision, platform)
++	_, _ = loadListBinIndex(r.assets, r.baseDir, activeRevision, platform)
++	_ = loadInfoIndex(r.assets, r.baseDir, activeRevision, platform)
+ }
+diff --git a/server/internal/service/listbin.go b/server/internal/service/listbin.go
+index 794d9ef..ce60945 100644
+--- a/server/internal/service/listbin.go
++++ b/server/internal/service/listbin.go
+@@ -2,7 +2,6 @@ package service
+ 
+ import (
+ 	"encoding/json"
+-	"os"
+ 	"path/filepath"
+ 	"strconv"
+ 	"strings"
+@@ -215,7 +214,7 @@ func parseListBin(data []byte) listBinIndex {
+ 	return idx
+ }
+ 
+-func loadListBinIndex(baseDir, revision, platform string) (listBinIndex, bool) {
++func loadListBinIndex(assets assetStore, baseDir, revision, platform string) (listBinIndex, bool) {
+ 	key := cacheKey(revision, platform)
+ 	listBinCacheMu.RLock()
+ 	idx, ok := listBinCache[key]
+@@ -239,7 +238,7 @@ func loadListBinIndex(baseDir, revision, platform string) (listBinIndex, bool) {
+ 	listBinCacheMu.Unlock()
+ 
+ 	filePath := filepath.Join(baseDir, "assets", "revisions", revision, platform, "list.bin")
+-	data, err := os.ReadFile(filePath)
++	data, err := assets.ReadFile(filePath)
+ 	if err != nil {
+ 		listBinCacheMu.Lock()
+ 		delete(listBinInflight, key)
+@@ -258,7 +257,7 @@ func loadListBinIndex(baseDir, revision, platform string) (listBinIndex, bool) {
+ 	return idx, true
+ }
+ 
+-func loadInfoIndex(baseDir, revision, platform string) map[string]infoAlias {
++func loadInfoIndex(assets assetStore, baseDir, revision, platform string) map[string]infoAlias {
+ 	key := cacheKey(revision, platform)
+ 	infoCacheMu.RLock()
+ 	m, ok := infoCache[key]
+@@ -282,7 +281,7 @@ func loadInfoIndex(baseDir, revision, platform string) map[string]infoAlias {
+ 	infoCacheMu.Unlock()
+ 
+ 	filePath := filepath.Join(baseDir, "assets", "revisions", revision, platform, "info.json")
+-	data, err := os.ReadFile(filePath)
++	data, err := assets.ReadFile(filePath)
+ 	if err != nil {
+ 		infoCacheMu.Lock()
+ 		infoCache[key] = nil
+@@ -461,13 +460,13 @@ func duplicateCandidatePath(baseDir string, candidate assetCandidate, platform,
+ // the un-split shared tree (revisions/0/...) which acts as a fallback for operators who deploy a
+ // single unified asset dump. Each tier carries its own list.bin md5 so corruption is still detected.
+ // Callers should try each path until one exists on disk.
+-func objectIdToFilePathCandidates(baseDir, revision, platform, assetType, objectId string) (candidates []assetCandidate, size int64, ok bool) {
++func objectIdToFilePathCandidates(assets assetStore, baseDir, revision, platform, assetType, objectId string) (candidates []assetCandidate, size int64, ok bool) {
+ 	seen := make(map[string]bool)
+ 	var firstSize int64
+ 	var anyHit bool
+ 
+ 	appendForPlatform := func(p, label string) {
+-		idx, idxOk := loadListBinIndex(baseDir, revision, p)
++		idx, idxOk := loadListBinIndex(assets, baseDir, revision, p)
+ 		if !idxOk || idx == nil {
+ 			return
+ 		}
+@@ -492,7 +491,7 @@ func objectIdToFilePathCandidates(baseDir, revision, platform, assetType, object
+ 				ExpectedMD5: md5,
+ 			})
+ 		}
+-		infoIndex := loadInfoIndex(baseDir, revision, p)
++		infoIndex := loadInfoIndex(assets, baseDir, revision, p)
+ 		if len(infoIndex) > 0 {
+ 			tierCandidates := candidates[tierStart:]
+ 			for _, c := range tierCandidates {
+diff --git a/server/internal/service/octo.go b/server/internal/service/octo.go
+index 42cfd83..a71ea29 100644
+--- a/server/internal/service/octo.go
++++ b/server/internal/service/octo.go
+@@ -75,6 +75,7 @@ type OctoHTTPServer struct {
+ 	mux              *http.ServeMux
+ 	ResourcesBaseURL string // if non-empty and exactly 43 chars, list.bin is rewritten to use this base for asset URLs
+ 	BaseDir          string // root directory containing the assets/ tree; empty means current directory
++	assets           assetStore
+ 	revisions        *revisionTracker
+ 	resolver         *assetResolver
+ }
+@@ -117,7 +118,7 @@ func (c *countResponseWriter) Write(p []byte) (int, error) {
+ 	return n, err
+ }
+ 
+-func fileMD5Hex(path string, info os.FileInfo) (string, error) {
++func fileMD5Hex(store assetStore, path string, info os.FileInfo) (string, error) {
+ 	modTime := info.ModTime().UnixNano()
+ 
+ 	fileMD5CacheMu.RLock()
+@@ -127,7 +128,7 @@ func fileMD5Hex(path string, info os.FileInfo) (string, error) {
+ 		return cached.md5, nil
+ 	}
+ 
+-	f, err := os.Open(path)
++	f, _, err := store.Open(path)
+ 	if err != nil {
+ 		return "", err
+ 	}
+@@ -149,19 +150,29 @@ func fileMD5Hex(path string, info os.FileInfo) (string, error) {
+ 	return sum, nil
+ }
+ 
+-func NewOctoHTTPServer(resourcesBaseURL, baseDir string) *OctoHTTPServer {
++func NewOctoHTTPServer(resourcesBaseURL, baseDir, tarPath, indexPath string) (*OctoHTTPServer, error) {
++	assets := newDirAssetStore(baseDir)
++	if tarPath != "" {
++		tarAssets, err := newTarAssetStore(baseDir, tarPath, indexPath)
++		if err != nil {
++			return nil, err
++		}
++		assets = tarAssets
++	}
++	log.Printf("asset store: %s", assets.Source())
+ 	s := &OctoHTTPServer{
+ 		mux:              http.NewServeMux(),
+ 		ResourcesBaseURL: resourcesBaseURL,
+ 		BaseDir:          baseDir,
++		assets:           assets,
+ 		revisions:        newRevisionTracker(),
+-		resolver:         newAssetResolver(baseDir),
++		resolver:         newAssetResolver(baseDir, assets),
+ 	}
+ 	s.resolver.Prewarm("0", platformAndroid)
+ 	s.resolver.Prewarm("0", platformIOS)
+ 	s.resolver.Prewarm("0", "")
+ 	s.mux.HandleFunc("/", s.handleAll)
+-	return s
++	return s, nil
+ }
+ 
+ func (s *OctoHTTPServer) Handler() http.Handler {
+@@ -173,7 +184,7 @@ func (s *OctoHTTPServer) Handler() http.Handler {
+ // keep working.
+ func (s *OctoHTTPServer) listBinPath(revision, platform string) string {
+ 	p := filepath.Join(s.BaseDir, "assets", "revisions", revision, platform, "list.bin")
+-	if _, err := os.Stat(p); err == nil {
++	if _, err := s.assets.Stat(p); err == nil {
+ 		return p
+ 	}
+ 	return filepath.Join(s.BaseDir, "assets", "revisions", revision, "list.bin")
+@@ -365,15 +376,10 @@ func (s *OctoHTTPServer) serveUnsoAsset(w http.ResponseWriter, r *http.Request,
+ 			continue
+ 		}
+ 		triedPaths = append(triedPaths, candidate.Revision+":"+candidate.Path+" ["+candidate.Source+"]")
+-		f, err := os.Open(candidate.Path)
++		f, info, err := s.assets.Open(candidate.Path)
+ 		if err != nil {
+ 			continue
+ 		}
+-		info, err := f.Stat()
+-		if err != nil {
+-			f.Close()
+-			continue
+-		}
+ 		if info.IsDir() {
+ 			f.Close()
+ 			continue
+@@ -384,7 +390,7 @@ func (s *OctoHTTPServer) serveUnsoAsset(w http.ResponseWriter, r *http.Request,
+ 			continue
+ 		}
+ 		if candidate.ExpectedMD5 != "" {
+-			actualMD5, err := fileMD5Hex(candidate.Path, info)
++			actualMD5, err := fileMD5Hex(s.assets, candidate.Path, info)
+ 			if err != nil {
+ 				log.Printf("[HTTP] Asset md5 read failed: %s err=%v", candidate.Path, err)
+ 				f.Close()
+@@ -414,7 +420,7 @@ func (s *OctoHTTPServer) serveUnsoAsset(w http.ResponseWriter, r *http.Request,
+ // serveListBin reads list.bin from filePath, optionally rewrites the resource base URL to s.ResourcesBaseURL
+ // (must be exactly 43 bytes to preserve protobuf layout), and writes the result to w.
+ func (s *OctoHTTPServer) serveListBin(w http.ResponseWriter, filePath string) {
+-	data, err := os.ReadFile(filePath)
++	data, err := s.assets.ReadFile(filePath)
+ 	if err != nil {
+ 		log.Printf("[Octo] list.bin read error: %v", err)
+ 		http.Error(w, "list not found", http.StatusNotFound)
+@@ -444,8 +450,15 @@ func (s *OctoHTTPServer) serveListBin(w http.ResponseWriter, filePath string) {
+ // there's only ever one bin.e on disk.
+ func (s *OctoHTTPServer) serveDatabaseBinE(w http.ResponseWriter, r *http.Request, _ string) {
+ 	filePath := filepath.Join(s.BaseDir, "assets", "release", "20240404193219.bin.e")
++	f, info, err := s.assets.Open(filePath)
++	if err != nil {
++		log.Printf("[Octo] database.bin.e read error: %v", err)
++		http.Error(w, "master data not found", http.StatusNotFound)
++		return
++	}
++	defer f.Close()
+ 	w.Header().Set("Content-Type", "application/octet-stream")
+-	http.ServeFile(w, r, filePath)
++	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+ }
+ 
+ func (s *OctoHTTPServer) handleWebAPI(w http.ResponseWriter, r *http.Request, path string) {

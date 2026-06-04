@@ -170,3 +170,18 @@ On first start, the CDN scans `assets.tar` and creates an index cache. Later sta
 - Dark theme enabled.
 - Added Clear logs button.
 - Added extra bottom padding so the last log line is not glued to the screen edge.
+
+## Version 0.5 notes
+- Added a new side-menu UI with Home, Logs, and Settings sections.
+- Added launcher icon resources.
+- Added asset and database status information on the Home screen.
+- Added IP mode selection and server start/stop controls.
+- Added asset folder and assets.tar import actions.
+- Added database import/export actions.
+- Added asset import progress for large files and folders.
+- Improved .bin.e extraction from assets.tar by scanning tar headers directly and skipping file data with seek().
+- Updated READY status detection: the app now waits until auth-server, lunar-tear, and octo-cdn all report that they are listening.
+- Added log refresh and clear actions.
+- Improved logs panel positioning.
+- Tapping the foreground service notification now opens the app.
+- Refactored the Android launcher code into smaller Kotlin files for easier maintenance.
